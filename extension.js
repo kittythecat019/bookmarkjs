@@ -19,7 +19,10 @@
 
             this.lastMessage = "";
 
+            this.created = false;
+
         }
+
 
         getInfo() {
 
@@ -105,6 +108,45 @@
 
                         isEdgeActivated:
                             false
+
+                    },
+
+
+                    // =========================
+                    // KHI WEB ĐƯỢC TẠO
+                    // =========================
+
+                    {
+                        opcode: "whenCreated",
+
+                        blockType:
+                            Scratch.BlockType.EVENT,
+
+                        text:
+                            Scratch.translate(
+                                "when web page created"
+                            ),
+
+                        isEdgeActivated:
+                            false
+
+                    },
+
+
+                    // =========================
+                    // WEB ĐƯỢC TẠO?
+                    // =========================
+
+                    {
+                        opcode: "isCreated",
+
+                        blockType:
+                            Scratch.BlockType.BOOLEAN,
+
+                        text:
+                            Scratch.translate(
+                                "web page created?"
+                            )
 
                     },
 
@@ -260,17 +302,41 @@
 
 
         // =========================
+        // HAT: WEB ĐƯỢC TẠO
+        // =========================
+
+        whenCreated() {
+
+            return false;
+
+        }
+
+
+        // =========================
+        // WEB ĐƯỢC TẠO?
+        // =========================
+
+        isCreated() {
+
+            return this.created;
+
+        }
+
+
+        // =========================
         // CREATE ROOM
         // =========================
 
-        create() {
+        async create() {
 
             console.log(
                 "[WebBridge] Creating room..."
             );
 
 
-            // Đóng WebSocket cũ
+            // =========================
+            // ĐÓNG WEBSOCKET CŨ
+            // =========================
 
             if (this.ws) {
 
@@ -283,6 +349,10 @@
             }
 
 
+            // =========================
+            // RESET
+            // =========================
+
             this.ws = null;
 
             this.room = "";
@@ -291,236 +361,352 @@
 
             this.lastMessage = "";
 
-
-            try {
-
-                // =========================
-                // KẾT NỐI SERVER
-                // =========================
-
-                this.ws =
-                    new WebSocket(
-                        "wss://extension-web-server-8fkf.onrender.com"
-                    );
+            this.created = false;
 
 
-                // =========================
-                // OPEN
-                // =========================
+            // =========================
+            // CHỜ TỐI ĐA 3 GIÂY
+            // =========================
 
-                this.ws.onopen = () => {
+            await new Promise((resolve) => {
 
-                    console.log(
-                        "[WebBridge] WebSocket connected"
-                    );
+                let finished = false;
 
 
-                    this.ws.send(
-                        JSON.stringify({
+                const finish = () => {
 
-                            type:
-                                "create"
+                    if (finished) {
+                        return;
+                    }
 
-                        })
-                    );
+                    finished = true;
+
+                    clearTimeout(timeout);
+
+                    resolve();
 
                 };
 
 
                 // =========================
-                // MESSAGE
+                // TIMEOUT
                 // =========================
 
-                this.ws.onmessage =
-                    (event) => {
+                const timeout =
+                    setTimeout(() => {
 
-                        console.log(
-                            "[WebBridge] Server:",
-                            event.data
+                        console.warn(
+                            "[WebBridge] Không tạo được web sau 3 giây"
                         );
 
 
-                        let data;
+                        this.created = false;
+
+                        this.room = "";
+
+                        this.webUrl = "";
 
 
-                        try {
+                        if (this.ws) {
 
-                            data =
-                                JSON.parse(
-                                    event.data
-                                );
+                            try {
 
-                        } catch {
+                                this.ws.close();
 
-                            console.error(
-                                "[WebBridge] Invalid JSON"
-                            );
-
-                            return;
+                            } catch {}
 
                         }
 
 
-                        // =========================
-                        // ROOM CREATED
-                        // =========================
-
-                        if (
-                            data.type ===
-                            "created"
-                        ) {
-
-                            this.room =
-                                data.room;
+                        this.ws = null;
 
 
-                            this.webUrl =
-                                "https://extension-web-server-8fkf.onrender.com" +
-                                data.url;
+                        finish();
 
+                    }, 3000);
+
+
+                try {
+
+                    // =========================
+                    // KẾT NỐI RENDER
+                    // =========================
+
+                    this.ws =
+                        new WebSocket(
+                            "wss://extension-web-server-8fkf.onrender.com"
+                        );
+
+
+                    // =========================
+                    // OPEN
+                    // =========================
+
+                    this.ws.onopen = () => {
+
+                        console.log(
+                            "[WebBridge] WebSocket connected"
+                        );
+
+
+                        this.ws.send(
+                            JSON.stringify({
+
+                                type:
+                                    "create"
+
+                            })
+                        );
+
+                    };
+
+
+                    // =========================
+                    // MESSAGE
+                    // =========================
+
+                    this.ws.onmessage =
+                        (event) => {
 
                             console.log(
-                                "[WebBridge] Room:",
-                                this.room
+                                "[WebBridge] Server:",
+                                event.data
                             );
 
 
-                            console.log(
-                                "[WebBridge] URL:",
-                                this.webUrl
-                            );
+                            let data;
 
 
-                            return;
+                            try {
 
-                        }
+                                data =
+                                    JSON.parse(
+                                        event.data
+                                    );
+
+                            } catch {
+
+                                console.error(
+                                    "[WebBridge] Invalid JSON"
+                                );
+
+                                return;
+
+                            }
 
 
-                        // =========================
-                        // NHẬN TIN NHẮN
-                        // =========================
+                            // =========================
+                            // ROOM CREATED
+                            // =========================
 
-                        if (
-                            data.type ===
-                            "message"
-                        ) {
+                            if (
+                                data.type ===
+                                "created"
+                            ) {
 
-                            this.lastMessage =
-                                String(
-                                    data.data
+                                if (finished) {
+                                    return;
+                                }
+
+
+                                this.room =
+                                    data.room;
+
+
+                                this.webUrl =
+                                    "https://extension-web-server-8fkf.onrender.com" +
+                                    data.url;
+
+
+                                this.created =
+                                    true;
+
+
+                                console.log(
+                                    "[WebBridge] Room:",
+                                    this.room
                                 );
 
 
-                            console.log(
-                                "[WebBridge] Received:",
-                                this.lastMessage
-                            );
+                                console.log(
+                                    "[WebBridge] URL:",
+                                    this.webUrl
+                                );
 
 
-                            // Kích hoạt:
-                            // "khi nhận tin nhắn"
+                                // =========================
+                                // KHI WEB ĐƯỢC TẠO
+                                // =========================
 
-                            const result =
+                                Scratch.vm.runtime.startHats(
+                                    "webbridge_whenCreated"
+                                );
+
+
+                                finish();
+
+                                return;
+
+                            }
+
+
+                            // =========================
+                            // NHẬN TIN NHẮN
+                            // =========================
+
+                            if (
+                                data.type ===
+                                "message"
+                            ) {
+
+                                this.lastMessage =
+                                    String(
+                                        data.data
+                                    );
+
+
+                                console.log(
+                                    "[WebBridge] Received:",
+                                    this.lastMessage
+                                );
+
+
                                 Scratch.vm.runtime.startHats(
                                     "webbridge_whenReceive"
                                 );
 
 
-                            console.log(
-                                "[WebBridge] RECEIVE HAT:",
-                                result
+                                return;
+
+                            }
+
+
+                            // =========================
+                            // ROOM CLOSED
+                            // =========================
+
+                            if (
+                                data.type ===
+                                "closed"
+                            ) {
+
+                                console.log(
+                                    "[WebBridge] Room closed"
+                                );
+
+
+                                this.room = "";
+
+                                this.webUrl = "";
+
+                                this.lastMessage = "";
+
+                                this.created = false;
+
+
+                                return;
+
+                            }
+
+
+                            // =========================
+                            // SERVER ERROR
+                            // =========================
+
+                            if (
+                                data.type ===
+                                "error"
+                            ) {
+
+                                console.error(
+                                    "[WebBridge] Server error:",
+                                    data.message
+                                );
+
+
+                                this.created = false;
+
+                                this.room = "";
+
+                                this.webUrl = "";
+
+
+                                finish();
+
+                                return;
+
+                            }
+
+                        };
+
+
+                    // =========================
+                    // ERROR
+                    // =========================
+
+                    this.ws.onerror =
+                        (error) => {
+
+                            console.error(
+                                "[WebBridge] WebSocket error:",
+                                error
                             );
 
 
-                            return;
-
-                        }
-
-
-                        // =========================
-                        // ROOM CLOSED
-                        // =========================
-
-                        if (
-                            data.type ===
-                            "closed"
-                        ) {
-
-                            console.log(
-                                "[WebBridge] Room closed"
-                            );
-
+                            this.created = false;
 
                             this.room = "";
 
                             this.webUrl = "";
 
-                            this.lastMessage = "";
+
+                            finish();
+
+                        };
 
 
-                            return;
+                    // =========================
+                    // CLOSE
+                    // =========================
 
-                        }
+                    this.ws.onclose = () => {
 
-
-                        // =========================
-                        // SERVER ERROR
-                        // =========================
-
-                        if (
-                            data.type ===
-                            "error"
-                        ) {
-
-                            console.error(
-                                "[WebBridge] Server error:",
-                                data.message
-                            );
-
-
-                            return;
-
-                        }
-
-                    };
-
-
-                // =========================
-                // ERROR
-                // =========================
-
-                this.ws.onerror =
-                    (error) => {
-
-                        console.error(
-                            "[WebBridge] WebSocket error:",
-                            error
+                        console.log(
+                            "[WebBridge] WebSocket closed"
                         );
 
+
+                        if (!this.created) {
+
+                            this.room = "";
+
+                            this.webUrl = "";
+
+                        }
+
                     };
 
 
-                // =========================
-                // CLOSE
-                // =========================
+                } catch (error) {
 
-                this.ws.onclose = () => {
-
-                    console.log(
-                        "[WebBridge] WebSocket closed"
+                    console.error(
+                        "[WebBridge] Error:",
+                        error
                     );
 
-                };
+
+                    this.created = false;
+
+                    this.room = "";
+
+                    this.webUrl = "";
 
 
-            } catch (error) {
+                    finish();
 
-                console.error(
-                    "[WebBridge] Error:",
-                    error
-                );
+                }
 
-            }
+            });
 
         }
 
@@ -613,15 +799,8 @@
             // KÍCH HOẠT HAT GỬI
             // =========================
 
-            const result =
-                Scratch.vm.runtime.startHats(
-                    "webbridge_whenSend"
-                );
-
-
-            console.log(
-                "[WebBridge] SEND HAT:",
-                result
+            Scratch.vm.runtime.startHats(
+                "webbridge_whenSend"
             );
 
         }
@@ -772,6 +951,8 @@
             this.webUrl = "";
 
             this.lastMessage = "";
+
+            this.created = false;
 
 
             try {
