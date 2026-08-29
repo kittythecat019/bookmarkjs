@@ -324,7 +324,7 @@ class WebBridge {
 
 
                         this.webUrl =
-                            "http://localhost:3000" +
+                            "http-server-web-bridge" +
                             data.url;
 
 
