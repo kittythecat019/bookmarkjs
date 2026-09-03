@@ -6,6 +6,7 @@ Mic: Termux:API via mic.py / android_mic.py
 """
 import base64
 import tempfile
+import httpx
 from __future__ import annotations
 
 import asyncio
@@ -621,10 +622,6 @@ async def speak_reply_synced(
     path = None
 
     try:
-        # =========================
-        # LẤY AUDIO TỪ RENDER
-        # =========================
-
         audio_b64 = _last_render_audio
         audio_format = (
             _last_render_audio_format or "wav"
@@ -663,13 +660,8 @@ async def speak_reply_synced(
                 )
                 path = None
 
-        # Audio này chỉ dùng một lần
         _last_render_audio = None
         _last_render_audio_format = "wav"
-
-        # =========================
-        # CHỜ MOB SOUND
-        # =========================
 
         leftover = float(hold_until or 0) - time.monotonic()
 
@@ -679,10 +671,6 @@ async def speak_reply_synced(
                 flush=True,
             )
             await asyncio.sleep(leftover)
-
-        # =========================
-        # HIỆN CHAT
-        # =========================
 
         if one_line:
             await say_verity(ws, chat_text)
@@ -698,20 +686,12 @@ async def speak_reply_synced(
 
                     await say_verity(ws, chunk)
 
-        # =========================
-        # MOUTH ANIMATION
-        # =========================
-
         if USE_ADDON_PIPELINE:
             await addon_mouth_only(
                 ws,
                 player_name,
                 chat_text,
             )
-
-        # =========================
-        # PHÁT AUDIO
-        # =========================
 
         if path:
             await asyncio.sleep(0.05)
@@ -735,7 +715,6 @@ async def speak_reply_synced(
         )
 
     finally:
-        # Xóa file tạm
         if path:
             try:
                 os.remove(path)
@@ -746,8 +725,7 @@ async def speak_reply_synced(
             await say_actionbar(ws, "")
         except Exception:
             pass
-
-
+            
 async def speak_hurt_synced(ws, player_name: str, reply: str) -> None:
     """
     Punch/bounce ouch: Fish TTS + chat only.
