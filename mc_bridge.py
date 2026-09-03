@@ -4,7 +4,8 @@ Verity in-game bridge for Android Termux via /connect.
 Uses groq_http (httpx) — NOT the openai SDK.
 Mic: Termux:API via mic.py / android_mic.py
 """
-
+import base64
+import tempfile
 from __future__ import annotations
 
 import asyncio
@@ -79,7 +80,12 @@ def _relax_websocket_close_codes() -> None:
 
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-
+RENDER_AI_URL = os.getenv(
+    "VERITY_AI_URL",
+    "https://verity-server-for-minecraft.onrender.com/ai"
+).strip()
+_last_render_audio = None
+_last_render_audio_format = "wav"
 _history: list[dict[str, str]] = []
 _busy = False
 _last_talk_at = 0.0
@@ -151,9 +157,6 @@ def _ask_llm(
     history_user: str | None = None,
     phase: int = 1,
 ) -> str:
-    if not GROQ_API_KEY or GROQ_API_KEY.startswith("gsk_your"):
-        raise RuntimeError("Set GROQ_API_KEY in .env")
-
     try_lock_language_from_text(history_user or user_text)
     _, lang_hint = resolve_reply_language(LANGUAGE, detected_lang)
 
@@ -168,28 +171,86 @@ def _ask_llm(
             ),
         }
     ]
+
     messages.extend(_history[-12:])
-    messages.append({"role": "user", "content": user_text})
+    messages.append({
+        "role": "user",
+        "content": user_text
+    })
 
     print(
-        f"[groq] chat model={LLM_MODEL} lang={lang_hint!r} "
-        f"locked={get_locked_language()!r} flavor={flavor_mode} phase={phase} "
+        f"[render] chat lang={lang_hint!r} "
+        f"locked={get_locked_language()!r} "
+        f"flavor={flavor_mode} phase={phase} "
         f"ctx={addon_context!r} q={user_text[:80]!r}",
         flush=True,
     )
-    reply = chat_completion(
-        messages,
-        model=LLM_MODEL,
-        temperature=LLM_TEMPERATURE,
-        max_tokens=LLM_MAX_TOKENS,
-    )
+
+    # Gửi toàn bộ context/history lên Render
+    payload = {
+        "messages": messages,
+        "message": user_text,
+        "detected_lang": detected_lang,
+        "flavor_mode": flavor_mode,
+        "addon_context": addon_context,
+        "phase": phase,
+    }
+
+    try:
+        response = httpx.post(
+            RENDER_AI_URL,
+            json=payload,
+            timeout=120.0,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Render AI connection error: {exc}"
+        ) from exc
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Render AI HTTP {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Render returned invalid JSON: {response.text[:500]}"
+        ) from exc
+
+    if not data.get("ok"):
+        raise RuntimeError(
+            f"Render AI error: {data.get('error', 'Unknown error')}"
+        )
+global _last_render_audio, _last_render_audio_format
+
+_last_render_audio = data.get("audio")
+_last_render_audio_format = data.get("format", "wav")
+    reply = str(data.get("reply", "")).strip()
+
     if not reply:
-        raise RuntimeError("Empty AI reply")
+        raise RuntimeError("Render returned an empty AI reply")
+
     if len(reply) >= 2 and reply[0] == reply[-1] and reply[0] in "\"'":
         reply = reply[1:-1].strip()
-    _history.append({"role": "user", "content": (history_user or user_text)})
-    _history.append({"role": "assistant", "content": reply})
-    print(f"[groq] ok ({len(reply)} chars)", flush=True)
+
+    _history.append({
+        "role": "user",
+        "content": history_user or user_text,
+    })
+
+    _history.append({
+        "role": "assistant",
+        "content": reply,
+    })
+
+    print(
+        f"[render] ok ({len(reply)} chars)",
+        flush=True,
+    )
+
     return reply
 
 
@@ -542,61 +603,147 @@ async def speak_reply_synced(
     hold_until: float = 0.0,
 ) -> None:
     """
-    Wait until Fish audio is ready, THEN show chat + anim, THEN play.
-    Chat always uses tellraw — Fish can still play if scriptevent ai_say is dropped.
-    Mouth uses scriptevent only (no second chat line).
-    one_line: print the whole reply as a single tellraw (say-X-times).
-    hold_until: monotonic timestamp — do not start Fish/chat before this
-    (lets a vanilla mob clip finish first).
+    Render đã tạo Fish Audio.
+    Bridge nhận WAV Base64 từ Render, lưu thành file WAV
+    rồi dùng play_wav_file() để phát local.
+
+    Không gọi Fish Audio lần nữa trên máy local.
     """
+
+    global _last_render_audio, _last_render_audio_format
+
     chat_text = strip_fish_tags(reply)
+
     if not chat_text:
         return
 
     path = None
+
     try:
-        if fish_tts_configured():
-            await say_actionbar(ws, "Loading voice...")
-            path, duration = await asyncio.to_thread(
-                lambda: prepare_fish(chat_text, style=style)
-            )
-            if path and duration > 0:
+        # =========================
+        # LẤY AUDIO TỪ RENDER
+        # =========================
+
+        audio_b64 = _last_render_audio
+        audio_format = (
+            _last_render_audio_format or "wav"
+        ).lower().strip()
+
+        if audio_b64:
+            try:
+                audio_data = base64.b64decode(audio_b64)
+
+                suffix = ".wav"
+
+                if audio_format == "mp3":
+                    suffix = ".mp3"
+
+                fd, path = tempfile.mkstemp(
+                    prefix="verity_render_",
+                    suffix=suffix,
+                )
+
+                os.close(fd)
+
+                with open(path, "wb") as audio_file:
+                    audio_file.write(audio_data)
+
                 print(
-                    f"[fish] synced say sec={duration:.2f} style={style}",
+                    f"[render] audio received "
+                    f"format={audio_format} "
+                    f"bytes={len(audio_data)}",
                     flush=True,
                 )
 
+            except Exception as exc:
+                print(
+                    f"[render] audio decode failed: {exc}",
+                    flush=True,
+                )
+                path = None
+
+        # Audio này chỉ dùng một lần
+        _last_render_audio = None
+        _last_render_audio_format = "wav"
+
+        # =========================
+        # CHỜ MOB SOUND
+        # =========================
+
         leftover = float(hold_until or 0) - time.monotonic()
+
         if leftover > 0.05:
-            print(f"[addon] hold Fish {leftover:.2f}s for mob sound", flush=True)
+            print(
+                f"[addon] hold voice {leftover:.2f}s for mob sound",
+                flush=True,
+            )
             await asyncio.sleep(leftover)
 
-        # Chat via tellraw — do not rely only on pntmc:ai_say.
+        # =========================
+        # HIỆN CHAT
+        # =========================
+
         if one_line:
             await say_verity(ws, chat_text)
         else:
             chunks = _chunk_for_scriptevent(chat_text)
+
             if not chunks:
                 await say_verity(ws, chat_text)
             else:
                 for index, chunk in enumerate(chunks):
                     if index:
                         await asyncio.sleep(0.12)
+
                     await say_verity(ws, chunk)
 
+        # =========================
+        # MOUTH ANIMATION
+        # =========================
+
         if USE_ADDON_PIPELINE:
-            await addon_mouth_only(ws, player_name, chat_text)
+            await addon_mouth_only(
+                ws,
+                player_name,
+                chat_text,
+            )
+
+        # =========================
+        # PHÁT AUDIO
+        # =========================
 
         if path:
             await asyncio.sleep(0.05)
-            await asyncio.to_thread(play_wav_file, path)
-        elif fish_tts_configured():
-            await asyncio.to_thread(speak_fish, chat_text, style=style)
+
+            if audio_format == "wav":
+                await asyncio.to_thread(
+                    play_wav_file,
+                    path,
+                )
+            else:
+                print(
+                    f"[render] unsupported audio format: "
+                    f"{audio_format}",
+                    flush=True,
+                )
+
+    except Exception as exc:
+        print(
+            f"[render] speak error: {exc}",
+            flush=True,
+        )
+
     finally:
-        finish_fish(path)
+        # Xóa file tạm
+        if path:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
         try:
             await say_actionbar(ws, "")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
