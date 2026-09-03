@@ -206,7 +206,7 @@ def _ask_llm(
         raise RuntimeError(
             f"Render AI connection error: {exc}"
         ) from exc
-
+ 
     if response.status_code >= 400:
         raise RuntimeError(
             f"Render AI HTTP {response.status_code}: "
@@ -220,14 +220,16 @@ def _ask_llm(
             f"Render returned invalid JSON: {response.text[:500]}"
         ) from exc
 
+    global _last_render_audio, _last_render_audio_format
+
+    _last_render_audio = data.get("audio")
+    _last_render_audio_format = data.get("format", "wav")
+
     if not data.get("ok"):
         raise RuntimeError(
             f"Render AI error: {data.get('error', 'Unknown error')}"
         )
-global _last_render_audio, _last_render_audio_format
 
-_last_render_audio = data.get("audio")
-_last_render_audio_format = data.get("format", "wav")
     reply = str(data.get("reply", "")).strip()
 
     if not reply:
@@ -252,7 +254,6 @@ _last_render_audio_format = data.get("format", "wav")
     )
 
     return reply
-
 
 def _transcribe(wav_path: str) -> tuple[str, str | None]:
     """
