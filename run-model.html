@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MNIST Scratch-style Runner</title>
+<style>
+body{font:14px Arial;margin:20px;max-width:1100px}
+button,input{margin:4px;padding:7px}
+canvas{display:block;border:1px solid #888;width:280px;height:280px;touch-action:none;background:#fff;cursor:crosshair}
+#log{white-space:pre-wrap;margin-top:10px}
+.layer{border:1px solid #aaa;border-radius:6px;margin:10px 0;padding:10px}
+.layer h4{margin:0 0 7px}
+.vals{font-family:monospace;white-space:pre-wrap;word-break:break-all}
+</style>
+
+<h3>MNIST Scratch-style Runner</h3>
+<input id="file" type="file" accept=".txt,.b36">
+<button id="load">Load Model</button>
+<button id="clear">Clear</button>
+<button id="run">Run Model</button>
+<canvas id="cv" width="280" height="280"></canvas>
+<div id="log">Chưa load model.</div>
+<div id="layers"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const cv=$("cv"),ctx=cv.getContext("2d");
+const abc="0123456789abcdefghijklmnopqrstuvwxyz";
+
+let D=[],I=[],input=Array(784).fill(0),ok=0;
+let SCALE=1e12;
+
+/* =========================
+   B36
+========================= */
+function b36(s){
+    let n=0;
+    let neg=s[0]=="-";
+    if(neg)s=s.slice(1);
+    for(const c of s)n=n*36+abc.indexOf(c);
+    return neg?-n:n;
+}
+
+function width(n){
+    let w=1;
+    while(36**w<=n-1)w++;
+    return w;
+}
+
+/* =========================
+   LOAD MODEL
+   Dictionary | dataid
+========================= */
+function load(t){
+    let p=t.indexOf("|");
+    if(p<0)throw Error("Không có |");
+
+    D=t.slice(0,p).split(",");
+    let r=t.slice(p+1).trim();
+    let w=width(D.length);
+
+    if(r.length%w)throw Error("dataid lỗi");
+
+    I=[];
+    for(let i=0;i<r.length;i+=w)
+        I.push(b36(r.slice(i,i+w)));
+
+    if(I.length!=26698)
+        throw Error("Cần 26698 dataid, nhận "+I.length);
+
+    ok=1;
+
+    $("log").textContent=
+        "Loaded\n"+
+        "Dictionary: "+D.length+"\n"+
+        "dataid: "+I.length+"\n"+
+        "idWidth: "+w+"\n"+
+        "Scale Scratch: /"+SCALE;
+}
+
+/* =========================
+   WEIGHT
+   IMPORTANT:
+   Scratch model values are assumed
+   already decoded by /1e8, so they
+   are 1e12 times larger than the
+   real weight.
+
+   Therefore:
+       realWeight = decoded / 1e12
+
+   This is equivalent to the Scratch
+   CONV/DENSE calculation requested.
+========================= */
+function weight(p){
+    let s=D[I[p]];
+    let neg=s[0]=="-";
+    if(neg)s=s.slice(1);
+
+    let n=b36(s);
+
+    /* Original encoded number has 20
+       decimal places. */
+    return (neg?-1:1)*n/1e20;
+}
+
+/* Value exactly as it would appear
+   in the current Scratch "model" list. */
+function scratchWeight(p){
+    return weight(p)*SCALE;
+}
+
+/* =========================
+   CONV
+   Scratch-style:
+
+   CONV size channels filters weightStart
+
+   weightStart is 1-based in Scratch.
+   JS arrays are converted internally.
+========================= */
+function conv(a,size,channels,filters,weightStart){
+    let o=[];
+
+    /* Output layout is exactly:
+       [y][x][filter]
+       This matches the original runmodel.html.
+    */
+    for(let y=0;y<size;y++){
+        for(let x=0;x<size;x++){
+            for(let f=0;f<filters;f++){
+
+                /* Scratch 1-based:
+                   bias = weightStart + 9*channels*filters + f
+                */
+                let biasIndex =
+                    weightStart +
+                    9*channels*filters +
+                    f;
+
+                let sum =
+                    scratchWeight(biasIndex-1) / SCALE;
+
+                for(let ky=0;ky<3;ky++){
+                    for(let kx=0;kx<3;kx++){
+
+                        let yy=y+ky-1;
+                        let xx=x+kx-1;
+
+                        if(yy<0 || yy>=size ||
+                           xx<0 || xx>=size)
+                            continue;
+
+                        for(let c=0;c<channels;c++){
+
+                            /* [y][x][channel] */
+                            let ai =
+                                (yy*size+xx)*channels+c;
+
+                            /* TFJS:
+                               [ky][kx][channel][filter]
+                            */
+                            let wi =
+                                ((ky*3+kx)*channels+c)*filters+f;
+
+                            /* weightStart is Scratch 1-based */
+                            let modelIndex =
+                                weightStart+wi;
+
+                            sum +=
+                                a[ai] *
+                                scratchWeight(modelIndex-1) /
+                                SCALE;
+                        }
+                    }
+                }
+
+                if(sum<0)sum=0;
+                o.push(sum);
+            }
+        }
+    }
+
+    return o;
+}
+
+/* =========================
+   POOL
+   Scratch-style:
+
+   POOL size channels
+
+   2x2 max pool, stride 2.
+   No scaling.
+========================= */
+function pool(a,size,channels){
+    let o=[];
+    let outSize=size/2;
+
+    /* Input/output layout:
+       [y][x][channel]
+    */
+    for(let y=0;y<size;y+=2){
+        for(let x=0;x<size;x+=2){
+            for(let c=0;c<channels;c++){
+
+                let m=-Infinity;
+
+                for(let py=0;py<2;py++){
+                    for(let px=0;px<2;px++){
+
+                        let yy=y+py;
+                        let xx=x+px;
+
+                        let ai =
+                            (yy*size+xx)*channels+c;
+
+                        if(a[ai]>m)
+                            m=a[ai];
+                    }
+                }
+
+                o.push(m);
+            }
+        }
+    }
+
+    return o;
+}
+
+/* =========================
+   DENSE
+   Scratch-style:
+
+   DENSE inputCount outputCount
+         weightStart relu
+
+   TFJS Dense kernel is:
+       [input][output]
+
+   index:
+       weightStart + i*outputCount + q
+========================= */
+function dense(a,inputCount,outputCount,weightStart,relu){
+    let o=[];
+
+    for(let q=0;q<outputCount;q++){
+
+        /* Bias */
+        let biasIndex =
+            weightStart +
+            inputCount*outputCount +
+            q;
+
+        let sum =
+            scratchWeight(biasIndex-1) / SCALE;
+
+        for(let i=0;i<inputCount;i++){
+
+            let wi =
+                i*outputCount+q;
+
+            let modelIndex =
+                weightStart+wi;
+
+            sum +=
+                a[i] *
+                scratchWeight(modelIndex-1) / SCALE;
+        }
+
+        if(relu && sum<0)
+            sum=0;
+
+        o.push(sum);
+    }
+
+    return o;
+}
+
+/* =========================
+   SHOW LAYER
+========================= */
+function fmt(v){
+    if(!Number.isFinite(v))return String(v);
+    return v.toPrecision(12);
+}
+
+function showLayer(name,a,extra=""){
+    let div=document.createElement("div");
+    div.className="layer";
+
+    let max=Math.max(...a);
+    let min=Math.min(...a);
+    let sum=a.reduce((x,y)=>x+y,0);
+    let nonzero=a.filter(v=>v!==0).length;
+
+    let header=document.createElement("div");
+
+    header.innerHTML=
+        "<h4>"+name+"</h4>"+
+        "<div>length = "+a.length+
+        " | min = "+fmt(min)+
+        " | max = "+fmt(max)+
+        " | sum = "+fmt(sum)+
+        " | non-zero = "+nonzero+
+        "</div>"+
+        (extra ? "<div>"+extra+"</div>" : "");
+
+    div.appendChild(header);
+
+    let button=document.createElement("button");
+    button.textContent="Hiện toàn bộ dữ liệu";
+
+    let vals=document.createElement("div");
+    vals.className="vals";
+
+    vals.style.maxHeight="400px";
+    vals.style.overflow="auto";
+    vals.style.border="1px solid #ccc";
+    vals.style.padding="5px";
+    vals.style.marginTop="5px";
+    vals.style.display="none";
+
+    function makeText(start,end){
+        let s="";
+
+        for(let i=start;i<end;i++){
+            s+=i+": "+fmt(a[i])+"\n";
+        }
+
+        return s;
+    }
+
+    let previewCount=Math.min(32,a.length);
+
+    vals.textContent=makeText(0,previewCount);
+
+    button.onclick=()=>{
+        if(vals.style.display==="none"){
+            vals.style.display="block";
+            button.textContent="Ẩn dữ liệu";
+
+            /*
+             Hiện TOÀN BỘ dữ liệu.
+            */
+            vals.textContent=makeText(0,a.length);
+
+        }else{
+            vals.style.display="none";
+            button.textContent="Hiện toàn bộ dữ liệu";
+
+            vals.textContent=makeText(0,previewCount);
+        }
+    };
+
+    div.appendChild(button);
+    div.appendChild(vals);
+
+    $("layers").appendChild(div);
+}
+
+/* =========================
+   RUN MODEL
+========================= */
+function run(){
+
+    if(!ok)throw Error("Load model trước");
+
+    $("layers").innerHTML="";
+
+    /* INPUT */
+    let A=input.slice();
+    showLayer("INPUT",A,
+        "non-zero = "+A.filter(v=>v!==0).length+
+        " | sum = "+fmt(A.reduce((x,y)=>x+y,0)));
+
+
+    /*
+       Scratch equivalent:
+
+       CONV 28 1 8 1
+       POOL 28 8
+       CONV 14 8 16 81
+       POOL 14 16
+       DENSE 784 32 1249 1
+       DENSE 32 10 26369 0
+    */
+
+    /* CONV1 */
+    A=conv(A,28,1,8,1);
+    showLayer("CONV1",A,
+        "SCRATCH layout: y → x → filter | 28×28×8 = "+A.length+
+        " | weights 1–80");
+
+    /* POOL1 */
+    A=pool(A,28,8);
+    showLayer("POOL1",A,
+        "14×14×8 = "+A.length);
+
+    /* CONV2 */
+    A=conv(A,14,8,16,81);
+    showLayer("CONV2",A,
+        "SCRATCH layout: y → x → filter | 14×14×16 = "+A.length+
+        " | weights 81–1248");
+
+    /* POOL2 */
+    A=pool(A,14,16);
+    showLayer("POOL2",A,
+        "7×7×16 = "+A.length);
+
+    /* DENSE1 */
+    A=dense(A,784,32,1249,true);
+    showLayer("DENSE1",A,
+        "32 neurons | weights 1249–26368 | ReLU");
+
+    /* DENSE2 */
+    A=dense(A,32,10,26369,false);
+    showLayer("DENSE2 / LOGITS",A,
+        "10 outputs | weights 26369–26698");
+
+    /* Softmax */
+    let mx=Math.max(...A);
+    let e=A.map(v=>Math.exp(v-mx));
+    let es=e.reduce((a,b)=>a+b,0);
+    let p=e.map(v=>v/es);
+
+    let r=p.indexOf(Math.max(...p));
+
+    showLayer("OUTPUT / SOFTMAX",p);
+
+    $("log").textContent=
+        "Result: "+r+
+        "\n"+
+        p.map((v,i)=>
+            i+": "+(v*100).toFixed(6)+"%"
+        ).join("\n");
+}
+
+/* =========================
+   DRAW INPUT
+   Same general input scale:
+   0..1
+========================= */
+let down=0,lx=0,ly=0;
+
+ctx.lineCap="round";
+ctx.lineJoin="round";
+ctx.lineWidth=18;
+ctx.strokeStyle="#000";
+ctx.fillStyle="#fff";
+ctx.fillRect(0,0,280,280);
+ctx.fillStyle="#000";
+
+ctx.fillStyle="#000";
+
+function pos(e){
+    let r=cv.getBoundingClientRect();
+    return [
+        (e.clientX-r.left)*cv.width/r.width,
+        (e.clientY-r.top)*cv.height/r.height
+    ];
+}
+
+function mark(x,y){
+    let gx=Math.floor(x*28/cv.width);
+    let gy=Math.floor(y*28/cv.height);
+
+    for(let yy=gy-2;yy<=gy+2;yy++){
+        for(let xx=gx-2;xx<=gx+2;xx++){
+            if(xx>=0&&xx<28&&yy>=0&&yy<28){
+                let d=Math.hypot(xx-gx,yy-gy);
+                if(d<=2){
+                    input[yy*28+xx]=Math.min(
+                        1,
+                        input[yy*28+xx]+0.25
+                    );
+                }
+            }
+        }
+    }
+}
+
+function startDraw(e){
+    e.preventDefault();
+    down=1;
+
+    try{cv.setPointerCapture(e.pointerId)}catch(_){}
+
+    [lx,ly]=pos(e);
+    mark(lx,ly);
+
+    ctx.beginPath();
+    ctx.arc(lx,ly,9,0,Math.PI*2);
+    ctx.fill();
+}
+
+function draw(e){
+    if(!down)return;
+    e.preventDefault();
+
+    let [x,y]=pos(e);
+
+    let n=Math.max(
+        1,
+        Math.ceil(Math.hypot(x-lx,y-ly)/3)
+    );
+
+    ctx.beginPath();
+    ctx.moveTo(lx,ly);
+    ctx.lineTo(x,y);
+    ctx.stroke();
+
+    for(let i=0;i<=n;i++){
+        mark(
+            lx+(x-lx)*i/n,
+            ly+(y-ly)*i/n
+        );
+    }
+
+    lx=x;
+    ly=y;
+}
+
+function stopDraw(e){
+    down=0;
+    try{cv.releasePointerCapture(e.pointerId)}catch(_){}
+}
+
+cv.addEventListener("pointerdown",startDraw);
+cv.addEventListener("pointermove",draw);
+cv.addEventListener("pointerup",stopDraw);
+cv.addEventListener("pointercancel",stopDraw);
+cv.addEventListener("pointerleave",e=>{
+    /* Không tắt down ở đây:
+       pointer capture giữ việc vẽ khi rê ra ngoài canvas. */
+});
+
+$("clear").onclick=()=>{
+    input.fill(0);
+    ctx.fillStyle="#fff";
+    ctx.fillRect(0,0,280,280);
+    ctx.fillStyle="#000";
+    ctx.strokeStyle="#000";
+    $("layers").innerHTML="";
+    $("log").textContent="Đã xóa input.";
+};
+
+$("load").onclick=()=>{
+    let f=$("file").files[0];
+
+    if(!f){
+        $("log").textContent=
+            "Chọn model-b36-v2.txt";
+        return;
+    }
+
+    f.text().then(t=>{
+        try{
+            load(t);
+        }catch(e){
+            $("log").textContent=
+                "Lỗi: "+e.message;
+        }
+    });
+};
+
+$("run").onclick=()=>{
+    try{
+        run();
+    }catch(e){
+        $("log").textContent=
+            "Lỗi: "+e.message;
+    }
+};
+</script>
+</html>
